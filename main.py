@@ -1,76 +1,108 @@
 import requests
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler
+import asyncio
+from aiogram import Bot, Dispatcher, types
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.filters import Command
+from aiogram.utils.keyboard import ReplyKeyboardMarkup, KeyboardButton
 from config import TOKEN
+from googletrans import Translator
+import re
 
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import StatesGroup, State
+from aiogram.fsm.storage.memory import MemoryStorage
 
-# Функция для получения информации о немецкой овчарке
-def get_german_shepherd_info():
-    url = 'https://api.thedogapi.com/v1/breeds'
+# Инициализация бота, диспетчера и хранилища состояний
+bot = Bot(token=TOKEN)
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
+translator = Translator()  # Инициализация переводчика
+
+# Класс состояний
+class FactState(StatesGroup):
+    fact_type = State()  # Состояние для хранения типа факта
+
+# Создаем кнопки с обновленными названиями
+buttons = [
+    [KeyboardButton(text="Факт из жизни"), KeyboardButton(text="Математический факт")],
+    [KeyboardButton(text="Факт о годе"), KeyboardButton(text="Факт о дате")]
+]
+keyboard = ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
+
+# Проверка, является ли введенная строка корректной датой
+def is_valid_date(date_str):
+    return re.match(r"^(0[1-9]|1[0-2])/(0[1-9]|[12][0-9]|3[01])$", date_str)
+
+# Проверка, является ли введенная строка годом
+def is_valid_year(year_str):
+    return year_str.isdigit() and len(year_str) == 4
+
+# Получение информации с сайта NumbersAPI и перевод на русский язык
+async def get_fact_and_translate(number, fact_type):
+    # Преобразуем тип факта в нужный формат для API
+    fact_type_en = {
+        "Факт из жизни": "trivia",
+        "Математический факт": "math",
+        "Факт о годе": "year",
+        "Факт о дате": "date"
+    }[fact_type]
+
+    url = f'http://numbersapi.com/{number}/{fact_type_en}'
     response = requests.get(url)
-    breeds = response.json()
-
-    # Найдем породу по названию
-    for breed in breeds:
-        if breed['name'].lower() == 'german shepherd dog':
-            breed_info = breed
-            break
-
-    # Формируем текст с информацией
-    info_text = f"*Порода*: {breed_info['name']}\n"
-    info_text += f"*Темперамент*: {breed_info['temperament']}\n"
-    info_text += f"*Средняя продолжительность жизни*: {breed_info['life_span']}\n"
-    info_text += f"*Вес*: {breed_info['weight']['metric']} кг\n"
-    info_text += f"*Высота*: {breed_info['height']['metric']} см\n"
-
-    # Рекомендации по уходу и кормлению
-    care_text = "Немецкие овчарки требуют регулярного ухода за шерстью, физической активности и сбалансированного питания. " \
-                "Кормление должно включать высококачественные корма с балансом белков и жиров."
-
-    # Рекомендации по дрессировке
-    training_text = "Немецкие овчарки легко обучаемы и требуют дрессировки с раннего возраста. " \
-                    "Они нуждаются в умственных и физических упражнениях."
-
-    return info_text, care_text, training_text
-
-
-# Функция для получения случайного фото
-def get_random_german_shepherd_photo():
-    url = 'https://api.thedogapi.com/v1/images/search?breed_ids=gsd'
-    response = requests.get(url)
-    photo_url = response.json()[0]['url']
-    return photo_url
-
+    if response.status_code == 200:
+        fact_in_english = response.text
+        # Переводим факт на русский язык
+        translation = translator.translate(fact_in_english, src='en', dest='ru').text
+        return translation
+    return "Не удалось получить информацию."
 
 # Обработчик команды /start
-async def start(update: Update, context):
-    info, care, training = get_german_shepherd_info()
-    photo_url = get_random_german_shepherd_photo()
+@dp.message(Command(commands=["start"]))
+async def start_command(message: types.Message):
+    await message.answer(f"Привет, {message.from_user.first_name} меня зовут Ларс!!! \n"
+                         f" Я знаю кучу фактов о числах и с удовольствием поделюсь своими зананиями \n"
+                         f"Выберите тип факта, а затем введите число.", reply_markup=keyboard)
 
-    # Отправляем информацию пользователю
-    await update.message.reply_text(info, parse_mode="Markdown")
-    await update.message.reply_text("*Рекомендации по уходу и кормлению*:\n" + care, parse_mode="Markdown")
-    await update.message.reply_text("*Рекомендации по дрессировке*:\n" + training, parse_mode="Markdown")
+# Обработчик выбора типа факта
+@dp.message(lambda message: message.text in ["Факт из жизни", "Математический факт", "Факт о годе", "Факт о дате"])
+async def handle_fact_type(message: types.Message, state: FSMContext):
+    fact_type = message.text
+    await state.update_data(fact_type=fact_type)
+    await message.answer(f"Введите число для типа {fact_type}:")
 
-    # Отправляем случайное фото
-    await update.message.reply_photo(photo_url)
+# Обработчик ввода числа
+@dp.message(lambda message: message.text.isdigit() or "/" in message.text)
+async def handle_number_input(message: types.Message, state: FSMContext):
+    user_data = await state.get_data()
+    fact_type = user_data.get("fact_type")
 
+    # Проверка на выбор типа факта
+    if not fact_type:
+        await message.answer("Сначала выберите тип факта.")
+        return
 
-# Основная функция
+    # Обработка типов "Факт о годе" и "Факт о дате"
+    if fact_type == "Факт о годе":
+        if is_valid_year(message.text):
+            fact = await get_fact_and_translate(message.text, fact_type)
+            await message.answer(fact)
+        else:
+            await message.answer("Введите корректный год (4 цифры).")
+    elif fact_type == "Факт о дате":
+        if is_valid_date(message.text):
+            fact = await get_fact_and_translate(message.text, fact_type)
+            await message.answer(fact)
+        else:
+            await message.answer("Введите корректную дату в формате MM/DD.")
+    else:
+        # Для типов "Факт из жизни" и "Математический факт" не требуется дополнительных проверок
+        fact = await get_fact_and_translate(message.text, fact_type)
+        await message.answer(fact)
+
+# Основная функция для запуска бота
 async def main():
-    # Создаем экземпляр приложения для работы с ботом
-    application = ApplicationBuilder().token(TOKEN).build()
+    await dp.start_polling(bot)
 
-    # Обрабатываем команду /start
-    application.add_handler(CommandHandler("start", start))
-
-    # Запускаем бота
-    await application.start()
-    await application.idle()
-
-
-# Запускаем бота
+# Запуск бота
 if __name__ == '__main__':
-    import asyncio
-
     asyncio.run(main())
